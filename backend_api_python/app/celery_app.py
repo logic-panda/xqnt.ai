@@ -22,6 +22,8 @@ class FlaskContextTask(Task):
             return self.run(*args, **kwargs)
 
 
+_TASK_TIME_LIMIT = max(120, int(os.getenv("CELERY_TASK_TIME_LIMIT", "3600")))
+
 celery_app = Celery("quantdinger", task_cls=FlaskContextTask)
 celery_app.conf.update(
     broker_url=celery_broker_url(),
@@ -37,10 +39,16 @@ celery_app.conf.update(
     worker_prefetch_multiplier=max(1, int(os.getenv("CELERY_WORKER_PREFETCH", "1"))),
     worker_max_tasks_per_child=max(1, int(os.getenv("CELERY_MAX_TASKS_PER_CHILD", "100"))),
     task_soft_time_limit=max(60, int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "3300"))),
-    task_time_limit=max(120, int(os.getenv("CELERY_TASK_TIME_LIMIT", "3600"))),
+    task_time_limit=_TASK_TIME_LIMIT,
     result_expires=max(3600, int(os.getenv("CELERY_RESULT_EXPIRES", "86400"))),
     broker_transport_options={
-        "visibility_timeout": max(3600, int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "7200"))),
+        # Must outlive the hard time limit: a redelivered agent job that is still marked running
+        # is treated as an interrupted attempt and failed.
+        "visibility_timeout": max(
+            3600,
+            _TASK_TIME_LIMIT + 600,
+            int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "7200")),
+        ),
     },
     imports=(
         "app.tasks.agent_jobs",

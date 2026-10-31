@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import datetime, timezone
+from time import perf_counter
 
 from flask import g, jsonify, request
 
@@ -130,12 +131,15 @@ def cancel_strategy_evolution_job(job_id: str):
 
 
 def _run_evolution_job(payload, on_progress):
+    from app.celery_app import celery_app
+
     request_payload = dict(payload or {})
     user_id = int(request_payload.pop("__userId"))
     return get_strategy_evolution_service().run(
         user_id=user_id,
         payload=request_payload,
         on_progress=on_progress,
+        deadline=perf_counter() + float(celery_app.conf.task_soft_time_limit),
     )
 
 

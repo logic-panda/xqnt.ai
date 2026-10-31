@@ -29,6 +29,12 @@ from .walk_forward import WalkForwardFold, build_walk_forward_plan
 Evaluator = Callable[[dict[str, Any], datetime, datetime, float, float], dict[str, Any]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 
+_FINALIZE_MARGIN_SECONDS = 60.0
+
+
+def _selectable(trial: dict[str, Any]) -> bool:
+    return not trial["pruned"] and trial["components"].get("validationActivity", 0) > 0
+
 
 class StrategyEvolutionFailure(ValueError):
     """A user-facing evolution failure with structured diagnostics."""
@@ -54,6 +60,7 @@ class StrategyEvolutionEngine:
         slippage: float,
         constraints: tuple[ParameterConstraint, ...] = (),
         on_progress: ProgressCallback | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         started_at = perf_counter()
         if not parameters:
@@ -109,7 +116,19 @@ class StrategyEvolutionEngine:
         seen: set[tuple[tuple[str, str], ...]] = set()
         attempts = 0
         max_attempts = trial_count if config.method == "grid" else max(trial_count * 30, trial_count + 100)
+        search_started_at = perf_counter()
+        time_budget_exhausted = False
+        leader: dict[str, Any] | None = None
         while len(trials) < trial_count and attempts < max_attempts:
+            if deadline is not None and trials:
+                # Stop searching while there is still time for the next trial plus the blind and
+                # cost-stress runs, so a slow strategy returns partial results instead of hitting
+                # the worker's time limit and losing everything.
+                per_trial = (perf_counter() - search_started_at) / len(trials)
+                reserve = per_trial * (2 + len(config.cost_multipliers)) + _FINALIZE_MARGIN_SECONDS
+                if perf_counter() + reserve > deadline:
+                    time_budget_exhausted = True
+                    break
             params = self._candidate(config, sampler, grid, history, len(trials))
             attempts += 1
             identity = tuple(sorted((str(key), repr(value)) for key, value in params.items()))
@@ -143,6 +162,14 @@ class StrategyEvolutionEngine:
             trials.append(trial)
             if not trial["pruned"]:
                 history.append((params, float(trial["score"])))
+            # Only the selected trial's validation slices are read after the search; release the
+            # rest so memory stays flat instead of growing with every trial.
+            if _selectable(trial) and (leader is None or trial["score"] > leader["score"]):
+                if leader is not None:
+                    leader["validationResults"] = []
+                leader = trial
+            else:
+                trial["validationResults"] = []
             if on_progress:
                 on_progress({
                     "phase": "search",
@@ -152,7 +179,7 @@ class StrategyEvolutionEngine:
                     "bestScore": max((row["score"] for row in trials if not row["pruned"]), default=0.0),
                 })
         completed = sorted(
-            (row for row in trials if not row["pruned"] and row["components"].get("validationActivity", 0) > 0),
+            (row for row in trials if _selectable(row)),
             key=lambda row: row["score"],
             reverse=True,
         )
@@ -248,6 +275,7 @@ class StrategyEvolutionEngine:
                 "duplicateTrials": duplicate_rejections,
                 "actualBacktestRuns": self._evaluation_count(),
                 "elapsedSeconds": round(perf_counter() - started_at, 2),
+                "timeBudgetExhausted": time_budget_exhausted,
             },
             "bestParams": best["params"],
             "trials": [self._public_trial(row) for row in trials],

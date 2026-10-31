@@ -105,6 +105,9 @@ def test_celery_delivery_does_not_repeat_claimed_or_terminal_job(monkeypatch, st
 
     monkeypatch.setattr(agent_jobs, "get_job_for_worker", lambda _: {"status": status, "kind": "backtest"})
     monkeypatch.setattr(agent_jobs, "_set_status", lambda *a, **kw: False)
+    # A redelivered running job is failed as interrupted; it must still never execute twice.
+    monkeypatch.setattr(agent_jobs, "_set_failure", Mock(return_value=True))
+    monkeypatch.setattr(agent_jobs, "_publish_progress", Mock())
     execute = Mock()
     monkeypatch.setattr(tasks, "_execute", execute)
     tasks.execute_agent_job.run("existing")
