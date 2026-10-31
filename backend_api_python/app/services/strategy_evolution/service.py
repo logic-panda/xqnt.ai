@@ -20,7 +20,7 @@ class StrategyEvolutionService:
     def __init__(self, *, backtest_service: StrategyV2BacktestService | None = None) -> None:
         self.backtest_service = backtest_service or StrategyV2BacktestService()
 
-    def run(self, *, user_id: int, payload: dict[str, Any], on_progress=None) -> dict[str, Any]:
+    def run(self, *, user_id: int, payload: dict[str, Any], on_progress=None, deadline: float | None = None) -> dict[str, Any]:
         source_id = _positive_int(payload.get("sourceId"))
         if not source_id:
             raise ValueError("strategyEvolution.sourceRequired")
@@ -84,6 +84,7 @@ class StrategyEvolutionService:
             slippage=slippage,
             constraints=constraints,
             on_progress=on_progress,
+            deadline=deadline,
         )
         result["source"] = {"id": source_id, "name": str(source.get("name") or "")}
         return result

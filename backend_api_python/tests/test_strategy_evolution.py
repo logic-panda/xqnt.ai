@@ -1021,15 +1021,17 @@ def test_background_runner_keeps_user_scope_out_of_engine_payload(monkeypatch):
 
     class Service:
         @staticmethod
-        def run(*, user_id, payload, on_progress):
-            captured.update(user_id=user_id, payload=payload, on_progress=on_progress)
+        def run(*, user_id, payload, on_progress, deadline):
+            captured.update(user_id=user_id, payload=payload, on_progress=on_progress, deadline=deadline)
             return {"status": "complete"}
 
     monkeypatch.setattr(evolution_routes, "get_strategy_evolution_service", lambda: Service())
     progress = lambda event: event
     result = evolution_routes._run_evolution_job({"__userId": 17, "sourceId": 9}, progress)
     assert result == {"status": "complete"}
+    deadline = captured.pop("deadline")
     assert captured == {"user_id": 17, "payload": {"sourceId": 9}, "on_progress": progress}
+    assert deadline > 0
 
 
 def test_celery_dispatches_strategy_evolution_to_durable_runner(monkeypatch):
@@ -1146,3 +1148,41 @@ def test_history_detects_only_running_jobs_past_the_worker_time_limit(monkeypatc
     assert evolution_routes._is_stale_running_job({"status": "running", "started_at": stale}) is True
     assert evolution_routes._is_stale_running_job({"status": "running", "started_at": recent}) is False
     assert evolution_routes._is_stale_running_job({"status": "succeeded", "started_at": stale}) is False
+
+
+def test_search_stops_at_deadline_and_returns_partial_result():
+    from time import perf_counter
+
+    def evaluator(params, start, end, commission, slippage):
+        return {
+            "totalReturn": 4.0 + params["fast"] / 100.0,
+            "sharpeRatio": 1.5,
+            "maxDrawdown": -3.0,
+            "winRate": 60.0,
+            "totalTrades": 6,
+            "totalExecutions": 12,
+            "equityCurve": [
+                {"time": start.isoformat(), "value": 10_000.0},
+                {"time": end.isoformat(), "value": 10_400.0},
+            ],
+        }
+
+    result = StrategyEvolutionEngine(evaluator).run(
+        parameters=[SearchParameter("fast", "int", minimum=5, maximum=40, step=5, default=10)],
+        config=EvolutionConfig.from_payload({
+            "method": "grid",
+            "trials": 8,
+            "blindRatio": 0,
+            "monteCarloPaths": 100,
+            "costMultipliers": [1],
+        }),
+        start_date=datetime(2024, 1, 1),
+        end_date=datetime(2025, 12, 31),
+        commission=0.0,
+        slippage=0.0,
+        deadline=perf_counter(),
+    )
+
+    assert result["summary"]["evaluatedTrials"] == 1
+    assert result["summary"]["timeBudgetExhausted"] is True
+    assert result["summary"]["recommended"] is False

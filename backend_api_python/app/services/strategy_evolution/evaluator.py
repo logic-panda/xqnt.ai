@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 import math
 from typing import Any
@@ -137,6 +138,18 @@ class PreparedEvolutionEvaluator:
         if cached is not None:
             self.stats["cacheHits"] += 1
             return cached
+        result = self._run(params, start_date, end_date, commission, slippage)
+        self._results[cache_key] = result
+        return result
+
+    def _run(
+        self,
+        params: dict[str, Any],
+        start_date: datetime,
+        end_date: datetime,
+        commission: float,
+        slippage: float,
+    ) -> dict[str, Any]:
         self.stats["backtestRuns"] += 1
         _run_id, result = self.backtest_service.run(
             user_id=self.user_id,
@@ -154,7 +167,6 @@ class PreparedEvolutionEvaluator:
             strategy_name=self.strategy_name,
             analysis_only=True,
         )
-        self._results[cache_key] = result
         return result
 
     def evaluate_plan(
@@ -166,17 +178,20 @@ class PreparedEvolutionEvaluator:
     ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
         if not folds:
             return []
-        result = self(
+        # Not cached: a full result holds per-bar curves and ledgers (~100 MB for six months
+        # of 5m bars) and the search never evaluates the same parameters twice.
+        result = self._run(
             params,
             folds[0].train_start,
             folds[-1].validation_end,
             commission,
             slippage,
         )
+        curve = _sorted_curve(result)
         return [
             (
-                _slice_result(result, fold.train_start, fold.train_end),
-                _slice_result(result, fold.validation_start, fold.validation_end),
+                _slice_result(result, fold.train_start, fold.train_end, curve),
+                _slice_result(result, fold.validation_start, fold.validation_end, curve),
             )
             for fold in folds
         ]
@@ -258,10 +273,8 @@ class _CachedInstrumentRulesProvider:
         return self.cache[key]
 
 
-def _slice_result(result: dict[str, Any], start_date: datetime, end_date: datetime) -> dict[str, Any]:
-    start = _naive_timestamp(start_date)
-    end = _naive_timestamp(end_date)
-    curve = sorted(
+def _sorted_curve(result: dict[str, Any]) -> list[tuple[pd.Timestamp, dict[str, Any]]]:
+    return sorted(
         (
             (_naive_timestamp(item.get("time") or item.get("date")), item)
             for item in (result.get("equityCurve") or [])
@@ -269,8 +282,20 @@ def _slice_result(result: dict[str, Any], start_date: datetime, end_date: dateti
         ),
         key=lambda row: row[0],
     )
-    before = [row for row in curve if row[0] < start]
-    selected = [row for row in curve if start <= row[0] <= end]
+
+
+def _slice_result(
+    result: dict[str, Any],
+    start_date: datetime,
+    end_date: datetime,
+    curve: list[tuple[pd.Timestamp, dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    start = _naive_timestamp(start_date)
+    end = _naive_timestamp(end_date)
+    if curve is None:
+        curve = _sorted_curve(result)
+    first = bisect_left(curve, start, key=lambda row: row[0])
+    selected = curve[first:bisect_right(curve, end, key=lambda row: row[0])]
     if not selected:
         return {
             "totalReturn": 0.0,
@@ -283,7 +308,7 @@ def _slice_result(result: dict[str, Any], start_date: datetime, end_date: dateti
             "equityCurve": [],
         }
 
-    baseline = float((before[-1][1] if before else selected[0][1]).get("value") or 0.0)
+    baseline = float((curve[first - 1][1] if first else selected[0][1]).get("value") or 0.0)
     values = [float(item.get("value") or 0.0) for _, item in selected]
     returns = pd.Series(([baseline] if baseline > 0 else []) + values, dtype="float64").pct_change().dropna()
     frequency = str((result.get("manifest") or {}).get("drivingFrequency") or "1d")
