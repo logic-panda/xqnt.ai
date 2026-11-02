@@ -208,18 +208,58 @@ def test_forming_candle_marker_is_sent_once():
     assert last_closed == "1970-01-01T00:00:03"
 
 
-def test_preclose_alert_reads_the_forming_candle_from_a_minute_before_it_closes():
+def _alert(mode: str = "close", timeframe: str = "5m", **targets) -> dict:
+    return {"timeframe": timeframe, "targets": {"trigger_mode": mode, **targets}}
+
+
+def test_preclose_alert_reads_the_forming_candle_from_its_lead_until_it_closes():
     service = IndicatorSignalAlertService.__new__(IndicatorSignalAlertService)
     reads = indicator_signal_alerts._reads_forming_candle
     close_at = datetime(2026, 11, 1, 21, 30)
+    two_minutes = _alert("preclose", preclose_seconds=120)
 
-    assert service._next_check("preclose", "5m", datetime(2026, 11, 1, 21, 28, 45), close_at) == datetime(2026, 11, 1, 21, 29)
-    assert not reads("preclose", "5m", datetime(2026, 11, 1, 21, 28, 58), close_at)
-    assert reads("preclose", "5m", datetime(2026, 11, 1, 21, 29, 1), close_at)
-    assert not reads("close", "5m", datetime(2026, 11, 1, 21, 29, 1), close_at)
-    # A 1m candle is read from its second half, not on its first tick.
-    assert not reads("preclose", "1m", datetime(2026, 11, 1, 21, 29, 29), close_at)
-    assert reads("preclose", "1m", datetime(2026, 11, 1, 21, 29, 31), close_at)
+    assert service._next_check(two_minutes, datetime(2026, 11, 1, 21, 27, 45), close_at) == datetime(2026, 11, 1, 21, 28)
+    assert not reads(two_minutes, datetime(2026, 11, 1, 21, 27, 58), close_at)
+    assert reads(two_minutes, datetime(2026, 11, 1, 21, 28, 1), close_at)
+    # Once the candle has closed it is too late, even if the exchange still serves it as forming.
+    assert not reads(two_minutes, datetime(2026, 11, 1, 21, 30, 1), close_at)
+    assert not reads(_alert(), datetime(2026, 11, 1, 21, 29, 1), close_at)
+    # Without a lead: the last minute.
+    assert service._next_check(_alert("preclose"), datetime(2026, 11, 1, 21, 28, 45), close_at) == datetime(2026, 11, 1, 21, 29)
+    assert not reads(_alert("preclose"), datetime(2026, 11, 1, 21, 28, 58), close_at)
+    assert reads(_alert("preclose"), datetime(2026, 11, 1, 21, 29, 1), close_at)
+    # Never in a candle's first minute (a 3m candle from 2 min before its close) nor on a 1m candle's
+    # first tick (from its second half).
+    assert not reads(_alert("preclose", "3m", preclose_seconds=180), datetime(2026, 11, 1, 21, 27, 59), close_at)
+    assert reads(_alert("preclose", "3m", preclose_seconds=180), datetime(2026, 11, 1, 21, 28, 1), close_at)
+    assert not reads(_alert("preclose", "1m", preclose_seconds=60), datetime(2026, 11, 1, 21, 29, 29), close_at)
+    assert reads(_alert("preclose", "1m", preclose_seconds=60), datetime(2026, 11, 1, 21, 29, 31), close_at)
+
+
+def test_preclose_alert_skips_markers_first_seen_once_their_candle_closed():
+    service = IndicatorSignalAlertService()
+    task = {"id": 1, "signal_keys": ["any"], "last_bar_time": "1970-01-01T00:00:01", "targets": {"trigger_mode": "preclose"}}
+    forming = {"signals": [{"type": "buy", "text": "Next Up", "renderMode": "events", "data": [None, None, 9.0, 13.0]}]}
+
+    # Candle 2 closed with a marker the alert never saw forming: too late to enter on it.
+    signals, last_closed, sent = service._pending_signals(forming, _df(4), task, scan_forming=True)
+
+    assert [(s["bar_index"], s["live"]) for s in signals] == [(3, True)]
+
+    # Candle 3 closes with one more marker: it was not there in time, so it is not sent either.
+    task.update(last_bar_time=last_closed, last_signal_payload={"sent": sent})
+    closed = {
+        "signals": [
+            {"type": "buy", "text": "Next Up", "renderMode": "events", "data": [None, None, 9.0, 13.0, None]},
+            {"type": "buy", "text": "LTA Bounce", "renderMode": "events", "data": [None, None, None, 12.5, None]},
+        ]
+    }
+    assert service._pending_signals(closed, _df(5), task, scan_forming=False)[0] == []
+
+    # Bar times that are not clock times cannot tell when a candle will close: it is sent at the close instead.
+    dated = _df(4).assign(time=["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"])
+    fresh = {"id": 2, "signal_keys": ["any"], "targets": {"trigger_mode": "preclose"}}
+    assert [s["bar_index"] for s in service._pending_signals(forming, dated, fresh)[0]] == [2]
 
 
 def test_confirmed_alert_checks_right_after_the_candle_closes():
@@ -229,13 +269,13 @@ def test_confirmed_alert_checks_right_after_the_candle_closes():
     before_close = datetime(2026, 11, 1, 21, 29, 35)
 
     assert close_at == datetime(2026, 11, 1, 21, 30)
-    assert service._next_check("close", "5m", before_close, close_at) == datetime(2026, 11, 1, 21, 30, 2)
-    assert service._next_check("preclose", "5m", before_close, close_at) == datetime(2026, 11, 1, 21, 30, 2)
+    assert service._next_check(_alert(), before_close, close_at) == datetime(2026, 11, 1, 21, 30, 2)
+    assert service._next_check(_alert("preclose"), before_close, close_at) == datetime(2026, 11, 1, 21, 30, 2)
     # The exchange has not rolled the candle over yet: retry shortly, not on the next poll.
-    assert service._next_check("close", "5m", datetime(2026, 11, 1, 21, 30, 3), close_at) == datetime(2026, 11, 1, 21, 30, 5)
+    assert service._next_check(_alert(), datetime(2026, 11, 1, 21, 30, 3), close_at) == datetime(2026, 11, 1, 21, 30, 5)
     # Realtime alerts keep their few-second poll; bar times that are not clock times keep the regular one.
-    assert service._next_check("realtime", "5m", before_close, close_at) == before_close + timedelta(seconds=5)
-    assert service._next_check("close", "5m", before_close, datetime(1970, 1, 1)) == before_close + timedelta(seconds=30)
+    assert service._next_check(_alert("realtime"), before_close, close_at) == before_close + timedelta(seconds=5)
+    assert service._next_check(_alert(), before_close, datetime(1970, 1, 1)) == before_close + timedelta(seconds=30)
 
 
 def test_signal_alert_catches_up_closed_candles_missed_since_last_check():
@@ -307,9 +347,11 @@ def test_signal_alert_payload_normalizes_trigger_mode_and_chart_exchange(monkeyp
         {"indicator_id": 12, "symbol": "ETH/USDT", "trigger_mode": "realtime", "exchange_id": "Binance", "market_type": "swap"},
     )
     preclose = service._sanitize_payload(
-        7, {"indicator_id": 12, "symbol": "ETH/USDT", "trigger_mode": "PreClose", "result_tracking": "Gale1"}
+        7, {"indicator_id": 12, "symbol": "ETH/USDT", "trigger_mode": "PreClose", "preclose_seconds": "180", "result_tracking": "Gale1"}
     )
-    unknown = service._sanitize_payload(7, {"indicator_id": 12, "symbol": "ETH/USDT", "trigger_mode": "tick", "result_tracking": "gale9"})
+    unknown = service._sanitize_payload(
+        7, {"indicator_id": 12, "symbol": "ETH/USDT", "trigger_mode": "tick", "preclose_seconds": 90, "result_tracking": "gale9"}
+    )
 
     assert (realtime["targets"]["trigger_mode"], realtime["targets"]["exchange_id"], realtime["targets"]["market_type"]) == (
         "realtime",
@@ -317,6 +359,7 @@ def test_signal_alert_payload_normalizes_trigger_mode_and_chart_exchange(monkeyp
         "swap",
     )
     assert (preclose["targets"]["trigger_mode"], preclose["targets"]["result_tracking"]) == ("preclose", "gale1")
+    assert (preclose["targets"]["preclose_seconds"], unknown["targets"]["preclose_seconds"], realtime["targets"]["preclose_seconds"]) == (180, 60, 60)
     assert (unknown["targets"]["trigger_mode"], unknown["targets"]["exchange_id"]) == ("close", "")
     assert realtime["targets"]["result_tracking"] == unknown["targets"]["result_tracking"] == "off"
 
