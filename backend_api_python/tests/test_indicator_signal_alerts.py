@@ -164,7 +164,7 @@ def test_signal_alert_events_mode_keeps_dense_events_explicit():
     assert signal["bar_index"] == 2
 
 
-def test_signal_alert_sends_every_marker_on_the_closed_candle():
+def test_markers_on_one_candle_go_out_as_one_signal():
     output = {
         "signals": [
             {"type": "buy", "text": "Next Up", "renderMode": "events", "data": [None, None, 9.0, None]},
@@ -172,7 +172,18 @@ def test_signal_alert_sends_every_marker_on_the_closed_candle():
         ]
     }
 
-    assert [s["label"] for s in _pending(output)] == ["Next Up", "Pullback Buy"]
+    assert [(s["type"], s["label"]) for s in _pending(output)] == [("buy", "Next Up + Pullback Buy")]
+
+
+def test_candle_whose_markers_point_both_ways_sends_nothing():
+    output = {
+        "signals": [
+            {"type": "buy", "text": "Next Up", "renderMode": "events", "data": [None, None, 9.0, None]},
+            {"type": "sell", "text": "LTA Break", "renderMode": "events", "data": [None, None, 11.0, None]},
+        ]
+    }
+
+    assert _pending(output) == []
 
 
 def test_close_alert_waits_for_the_forming_candle_to_close():
@@ -195,7 +206,7 @@ def test_forming_candle_marker_is_sent_once():
     task.update(last_bar_time=last_closed, last_signal_payload={"sent": sent})
     assert service._pending_signals(forming, _df(4), task, scan_forming=True)[0] == []
 
-    # Once candle 3 closes, only the marker it gained at the close goes out.
+    # Candle 3 already had its alert: a marker it gains later, at its close, is not sent again.
     closed = {
         "signals": [
             {"type": "buy", "text": "Next Up", "renderMode": "events", "data": [None, None, None, 13.0, None]},
@@ -204,8 +215,28 @@ def test_forming_candle_marker_is_sent_once():
     }
     signals, last_closed, _ = service._pending_signals(closed, _df(5), task, scan_forming=True)
 
-    assert [(s["label"], s["live"]) for s in signals] == [("LTA Bounce", False)]
+    assert signals == []
     assert last_closed == "1970-01-01T00:00:03"
+
+
+def test_forming_candle_waits_until_its_markers_agree():
+    service = IndicatorSignalAlertService()
+    task = {"id": 1, "signal_keys": ["any"], "last_bar_time": "1970-01-01T00:00:02"}
+    both = {
+        "signals": [
+            {"type": "buy", "text": "Next Up", "renderMode": "events", "data": [None, None, None, 13.0]},
+            {"type": "sell", "text": "LTA Break", "renderMode": "events", "data": [None, None, None, 14.0]},
+        ]
+    }
+    only_sell = {"signals": [{"type": "sell", "text": "LTA Break", "renderMode": "events", "data": [None, None, None, 14.0]}]}
+
+    assert service._pending_signals(both, _df(4), task, scan_forming=True)[0] == []
+    signals, _, sent = service._pending_signals(only_sell, _df(4), task, scan_forming=True)
+    assert [(s["type"], s["label"]) for s in signals] == [("sell", "LTA Break")]
+
+    # Once sent, an opposite marker on the same candle never goes out as a second, contradicting alert.
+    task.update(last_signal_payload={"sent": sent})
+    assert service._pending_signals(both, _df(4), task, scan_forming=True)[0] == []
 
 
 def _alert(mode: str = "close", timeframe: str = "5m", **targets) -> dict:
@@ -291,7 +322,7 @@ def test_signal_alert_catches_up_closed_candles_missed_since_last_check():
     assert [s["bar_index"] for s in _pending(output, df=_df(7), last_bar_time="1970-01-01T00:00:00")] == [3, 4, 5]
 
 
-def test_evaluate_task_delivers_each_marker_once_from_the_chart_exchange(monkeypatch):
+def test_evaluate_task_delivers_each_candle_once_from_the_chart_exchange(monkeypatch):
     service = IndicatorSignalAlertService()
     task = {
         "id": 9,
@@ -328,13 +359,13 @@ def test_evaluate_task_delivers_each_marker_once_from_the_chart_exchange(monkeyp
     monkeypatch.setattr(service, "_mark_checked", lambda task_id, **kwargs: saved.update(checked=kwargs))
 
     assert service.evaluate_task(9)["triggered"] is True
-    # Both markers on closed candle 2, then the live marker on forming candle 3.
-    assert delivered == ["Next Up", "Pullback Sell", "Next Up"]
+    # Closed candle 2's markers point both ways (no trade); forming candle 3's live marker goes out.
+    assert delivered == ["Next Up"]
     assert (kline_calls[0]["exchange_id"], kline_calls[0]["market_type"]) == ("binance", "swap")
 
     task.update(last_bar_time=saved["last_bar_time"], last_signal_payload={"sent": saved["sent"]})
     assert service.evaluate_task(9)["triggered"] is False
-    assert len(delivered) == 3
+    assert len(delivered) == 1
     assert saved["checked"]["last_bar_time"] == "1970-01-01T00:00:02"
 
 

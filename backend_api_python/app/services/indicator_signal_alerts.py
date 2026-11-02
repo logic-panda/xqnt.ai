@@ -1,9 +1,10 @@
 """Indicator signal alert tasks.
 
-This service monitors chart-only indicator ``output.signals`` and delivers a
-notification for every selected marker the chart draws: on each candle as it
-closes, or already on the forming candle for pre-close and realtime alerts. It
-never places orders and does not reuse strategy execution state.
+This service monitors chart-only indicator ``output.signals`` and delivers one
+notification per candle with the selected markers the chart draws on it (none
+when they point both ways): as the candle closes, or already while it forms for
+pre-close and realtime alerts. It never places orders and does not reuse
+strategy execution state.
 """
 from __future__ import annotations
 
@@ -903,14 +904,17 @@ class IndicatorSignalAlertService:
     def _pending_signals(
         self, output: Dict[str, Any], df: pd.DataFrame, task: Dict[str, Any], *, scan_forming: bool = False
     ) -> tuple[List[Dict[str, Any]], Optional[str], List[str]]:
-        """Return the markers to deliver now, the newest closed candle's time and the sent fingerprints.
+        """Return the signals to deliver now, the newest closed candle's time and the sent fingerprints.
 
         The last row is the forming candle, scanned only with ``scan_forming``. Closed candles after
         ``last_bar_time`` are scanned once (at most ``_CATCH_UP_BARS``, so a missed check still
         delivers); a new alert starts at the newest closed candle. Pre-close alerts on clock-time
         candles scan only the forming candle: they exist to leave time to act, so a marker first seen
-        at the close is skipped. Every selected marker on a scanned candle is returned unless its
-        fingerprint was already sent.
+        at the close is skipped. A scanned candle yields one signal, its selected markers together
+        (labels joined), once: not again when it gains markers later, and not while its markers
+        point both ways. That is no trade, as the indicators' own hit counters score it; replaying
+        the 5m Next-Candle indicator on 90 days of BTC, ETH and SOL, neither side of those
+        candles reached the win rate that pays with one gale.
         """
         signals = output.get("signals") or []
         if not isinstance(signals, list) or len(df) < 2:
@@ -930,11 +934,16 @@ class IndicatorSignalAlertService:
         selected = {_normalize_key(k) for k in (task.get("signal_keys") or ["any"])}
         pending = []
         for idx in range(start, end + 1):
-            for signal in self._bar_signals(signals, df, idx, selected, times):
-                fingerprint = self._signal_fingerprint(task, signal)
-                if fingerprint not in sent:
-                    sent.append(fingerprint)
-                    pending.append(signal)
+            found = self._bar_signals(signals, df, idx, selected, times)
+            candle = self._signal_fingerprint(task, {"bar_time": times[idx]})
+            sides = {_signal_side(f["label"], f["type"]) for f in found} & {"buy", "sell"}
+            if not found or candle in sent or len(sides) > 1:
+                continue
+            sent.append(candle)
+            signal = dict(found[0], label=" + ".join(f["label"] for f in found))
+            if sides:
+                signal["type"] = next(iter(sides))
+            pending.append(signal)
         return pending, times[last_closed], sent[-_SENT_MEMORY:]
 
     def _bar_signals(self, signals: List[Any], df: pd.DataFrame, idx: int, selected: set[str], times: List[str]) -> List[Dict[str, Any]]:

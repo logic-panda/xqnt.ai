@@ -378,8 +378,22 @@ class EmailService:
         </div>
         """
         
-        # Send email
-        return self.send_email(email, subject, html_body)
+        # Send email. If delivery fails, drop the stored code so the per-email
+        # rate limit doesn't block a retry for a code the user never received.
+        sent, msg = self.send_email(email, subject, html_body)
+        if not sent:
+            try:
+                with get_db_connection() as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "DELETE FROM qd_verification_codes WHERE email = ? AND type = ? AND code = ? AND used_at IS NULL",
+                        (email, code_type, code)
+                    )
+                    db.commit()
+                    cur.close()
+            except Exception as e:
+                logger.error(f"Failed to discard undelivered verification code: {e}")
+        return sent, msg
     
     # =========================================================================
     # Email Validation
