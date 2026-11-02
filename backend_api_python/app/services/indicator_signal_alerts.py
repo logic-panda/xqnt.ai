@@ -40,10 +40,12 @@ logger = get_logger(__name__)
 _CATCH_UP_BARS = 3
 # Fingerprints kept so a marker sent on the forming candle is not sent again when that candle closes.
 _SENT_MEMORY = 32
-# Pre-close alerts read the forming candle from this long before it closes, so people have time to
-# act. Replaying a 5m indicator on ETH/USDT with 5 s checks, markers present a minute before the
-# close rarely vanished (3 in 100 candles) while markers sent on first sight often did (44).
-_PRE_CLOSE_SECONDS = 60
+# Pre-close alerts read the forming candle from 1, 2 or 3 minutes (the alert's choice) before it
+# closes, so people have time to act. Replaying the 5m Next-Candle indicator on 30 days of BTC, ETH
+# and SOL 1m candles with a 2-minute lead, 23% of the markers sent were gone at the close, yet trading
+# every one won about as often as the markers confirmed at the close (56.5% vs 57.5%, 81.3% vs 81.6%
+# with one gale); with a 4-minute lead, 47% vanished and 54.8% won.
+_PRE_CLOSE_LEADS = (60, 120, 180)
 # Gales after the entry candle for alerts that mark their Telegram messages WIN/LOSS ('off' marks none).
 _RESULT_GALES = {"next": 0, "gale1": 1, "gale2": 2}
 # A result still undecided this long after its last candle should have closed is given up.
@@ -238,14 +240,22 @@ def _alert_zone(task: Dict[str, Any]) -> tzinfo:
 
 def _trigger_mode(task: Dict[str, Any]) -> str:
     """When an alert reads the forming candle, whose marker can still vanish before it closes:
-    'close' (default) never, 'preclose' from ``_PRE_CLOSE_SECONDS`` before it closes, 'realtime' always."""
+    'close' (default) never, 'preclose' from its lead (``_pre_close_lead``) until it closes, 'realtime' always."""
     mode = (task.get("targets") or {}).get("trigger_mode")
     return mode if mode in ("preclose", "realtime") else "close"
 
 
-def _pre_close_lead(timeframe: Any) -> timedelta:
-    # At most half a candle, so 1m alerts are not read on the candle's first tick.
-    return timedelta(seconds=min(_PRE_CLOSE_SECONDS, frequency_seconds(timeframe) // 2))
+def _preclose_seconds(task: Dict[str, Any]) -> int:
+    """The lead a pre-close alert asked for, in seconds."""
+    lead = (task.get("targets") or {}).get("preclose_seconds")
+    return lead if lead in _PRE_CLOSE_LEADS else _PRE_CLOSE_LEADS[0]
+
+
+def _pre_close_lead(task: Dict[str, Any]) -> timedelta:
+    """How long before the forming candle closes a pre-close alert starts reading it: its lead, but
+    never in the candle's first minute (first half for 1m candles, so not on their first tick)."""
+    step = frequency_seconds(task.get("timeframe"))
+    return timedelta(seconds=min(_preclose_seconds(task), max(step // 2, step - 60)))
 
 
 def _utc(epoch: float) -> datetime:
@@ -293,10 +303,12 @@ def _trade_outcome(df: pd.DataFrame, entry_time: int, side: str, gales: int, ste
     return {"status": "loss", "step": gales, "entry": entry, "exit": exit_}
 
 
-def _reads_forming_candle(mode: str, timeframe: Any, now: datetime, close_at: Optional[datetime]) -> bool:
+def _reads_forming_candle(task: Dict[str, Any], now: datetime, close_at: Optional[datetime]) -> bool:
+    mode = _trigger_mode(task)
     if mode == "realtime":
         return True
-    return mode == "preclose" and close_at is not None and now >= close_at - _pre_close_lead(timeframe)
+    # Pre-close alerts stop at the close: a candle the exchange has not rolled over yet is too late.
+    return mode == "preclose" and close_at is not None and close_at - _pre_close_lead(task) <= now < close_at
 
 
 def _fmt_candle_time(value: Any, zone: tzinfo = timezone.utc) -> str:
@@ -662,7 +674,6 @@ class IndicatorSignalAlertService:
         if task.get("status") != "running":
             return {"triggered": False, "reason": "paused"}
 
-        mode = _trigger_mode(task)
         try:
             indicator = self._load_indicator_for_user(int(task["user_id"]), int(task["indicator_id"]))
             code = str(indicator.get("runtime_code") or indicator.get("code") or "")
@@ -687,9 +698,9 @@ class IndicatorSignalAlertService:
             output = self._execute_indicator(code, df, task.get("params") or {})
             now = _now()
             close_at = _candle_close_at(df, task.get("timeframe"))
-            scan_forming = _reads_forming_candle(mode, task.get("timeframe"), now, close_at)
+            scan_forming = _reads_forming_candle(task, now, close_at)
             signals, last_closed_time, sent = self._pending_signals(output, df, task, scan_forming=scan_forming)
-            next_check = self._next_check(mode, task.get("timeframe"), now, close_at)
+            next_check = self._next_check(task, now, close_at)
             if not signals:
                 self._mark_checked(task_id, next_check=next_check, last_error="", last_bar_time=last_closed_time)
                 return {"triggered": False, "reason": "no_signal"}
@@ -756,6 +767,8 @@ class IndicatorSignalAlertService:
             raise ValueError("Missing Webhook URL")
         trigger_mode = str(payload.get("trigger_mode") or targets.get("trigger_mode") or "").strip().lower()
         targets["trigger_mode"] = trigger_mode if trigger_mode in ("preclose", "realtime") else "close"
+        lead = str(payload.get("preclose_seconds") or targets.get("preclose_seconds") or "").strip()
+        targets["preclose_seconds"] = next((s for s in _PRE_CLOSE_LEADS if str(s) == lead), _PRE_CLOSE_LEADS[0])
         result_tracking = str(payload.get("result_tracking") or targets.get("result_tracking") or "").strip().lower()
         targets["result_tracking"] = result_tracking if result_tracking in _RESULT_GALES else "off"
         # The chart's candle source, so the alert reads the candles the chart drew its markers on.
@@ -784,6 +797,7 @@ class IndicatorSignalAlertService:
         data["channels"] = _json_loads(data.get("channels"), ["browser"])
         data["targets"] = _json_loads(data.get("target_json"), {})
         data["trigger_mode"] = _trigger_mode(data)
+        data["preclose_seconds"] = _preclose_seconds(data)
         data["result_tracking"] = data["targets"].get("result_tracking") if _result_gales(data) is not None else "off"
         data["params"] = _json_loads(data.get("param_json"), {})
         data["last_signal_payload"] = _json_loads(data.get("last_signal_payload"), {})
@@ -893,8 +907,10 @@ class IndicatorSignalAlertService:
 
         The last row is the forming candle, scanned only with ``scan_forming``. Closed candles after
         ``last_bar_time`` are scanned once (at most ``_CATCH_UP_BARS``, so a missed check still
-        delivers); a new alert starts at the newest closed candle. Every selected marker on a scanned
-        candle is returned unless its fingerprint was already sent.
+        delivers); a new alert starts at the newest closed candle. Pre-close alerts on clock-time
+        candles scan only the forming candle: they exist to leave time to act, so a marker first seen
+        at the close is skipped. Every selected marker on a scanned candle is returned unless its
+        fingerprint was already sent.
         """
         signals = output.get("signals") or []
         if not isinstance(signals, list) or len(df) < 2:
@@ -906,6 +922,9 @@ class IndicatorSignalAlertService:
         if watermark in times:
             start = max(times.index(watermark) + 1, last_closed - _CATCH_UP_BARS + 1)
         end = len(df) - 1 if scan_forming else last_closed
+        # Without clock times a pre-close alert cannot tell when a candle closes and works like a close alert.
+        if _trigger_mode(task) == "preclose" and _candle_close_at(df, task.get("timeframe")) is not None:
+            start = len(df) - 1
         saved = task.get("last_signal_payload")
         sent = list(saved.get("sent") or []) if isinstance(saved, dict) else []
         selected = {_normalize_key(k) for k in (task.get("signal_keys") or ["any"])}
@@ -1468,13 +1487,14 @@ class IndicatorSignalAlertService:
         # Realtime alerts re-read the forming candle every few seconds (slower on long timeframes).
         return max(5, base // 6) if realtime else base
 
-    def _next_check(self, mode: str, timeframe: Any, now: datetime, close_at: Optional[datetime]) -> datetime:
+    def _next_check(self, task: Dict[str, Any], now: datetime, close_at: Optional[datetime]) -> datetime:
         """The regular poll, pulled in to just after the forming candle closes and, for pre-close
         alerts, to the pre-close lead before it. Bar times that are not clock times keep the poll."""
-        poll = timedelta(seconds=self._poll_seconds(timeframe, realtime=mode == "realtime"))
+        mode = _trigger_mode(task)
+        poll = timedelta(seconds=self._poll_seconds(task.get("timeframe"), realtime=mode == "realtime"))
         if mode == "realtime" or close_at is None or close_at < now - poll:
             return now + poll
-        lead_at = close_at - _pre_close_lead(timeframe)
+        lead_at = close_at - _pre_close_lead(task)
         # 2 s after the close so the exchange already serves the new candle.
         target = lead_at if mode == "preclose" and now < lead_at else close_at + timedelta(seconds=2)
         # Never sooner than 2 s, so a candle the exchange has not rolled over yet is retried calmly.
