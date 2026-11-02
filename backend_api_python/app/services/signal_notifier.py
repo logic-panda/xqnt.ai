@@ -390,7 +390,7 @@ class SignalNotifier:
                     ok, err = self._notify_discord(url=url, payload=payload, fallback_text=message_plain)
                 elif c == "telegram":
                     chat_id = (targets.get("telegram") or "").strip()
-                    # User's token takes priority, then falls back to env TELEGRAM_BOT_TOKEN.
+                    # The platform TELEGRAM_BOT_TOKEN wins in _telegram_api; this is the legacy per-user bot.
                     token_override = ""
                     try:
                         token_override = str(
@@ -960,8 +960,6 @@ class SignalNotifier:
         parse_mode: str = "",
     ) -> Tuple[bool, str]:
         token = (token_override or "").strip()
-        if not token:
-            return False, "missing_telegram_bot_token (请在个人中心配置 Telegram Bot Token)"
         if not chat_id:
             return False, "missing_telegram_chat_id"
         data: Dict[str, Any] = {
@@ -977,7 +975,13 @@ class SignalNotifier:
     def _telegram_api(
         self, token: str, method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Any]:
-        """Call a Telegram Bot API method: (True, its result) or (False, an error without the token)."""
+        """Call a Telegram Bot API method: (True, its result) or (False, an error without the token).
+
+        The platform bot (TELEGRAM_BOT_TOKEN) sends for every user once configured; ``token`` is
+        only the legacy per-user bot used when no platform bot is set."""
+        token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip() or (token or "").strip()
+        if not token:
+            return False, "missing_telegram_bot_token"
         try:
             resp = requests.post(f"https://api.telegram.org/bot{token}/{method}", data=data, files=files, timeout=self.timeout_sec)
             if not 200 <= resp.status_code < 300:

@@ -1868,6 +1868,49 @@ paths:
       - Users
       operationId: postApiUsersNotificationSettingsTest
       x-visibility: internal
+  /api/users/notification-settings/telegram-link:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Post Api Users Notification Settings Telegram Link
+      tags:
+      - Users
+      operationId: postApiUsersNotificationSettingsTelegramLink
+      description: Create a deep link that connects the current user's Telegram chat
+        to the platform bot.
+      x-visibility: internal
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Get Api Users Notification Settings Telegram Link
+      tags:
+      - Users
+      operationId: getApiUsersNotificationSettingsTelegramLink
+      description: Report whether the Telegram link ``code`` has been opened in the
+        bot; returns the bound chat id.
+      x-visibility: internal
   /api/users/change-password:
     post:
       responses:

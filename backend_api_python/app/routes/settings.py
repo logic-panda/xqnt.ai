@@ -1351,6 +1351,23 @@ CONFIG_SCHEMA = {
         ]
     },
 
+    'telegram': {
+        'title': 'Telegram Bot',
+        'icon': 'send',
+        'order': 6.5,
+        'items': [
+            {
+                'key': 'TELEGRAM_BOT_TOKEN',
+                'label': 'Bot Token',
+                'type': 'password',
+                'required': False,
+                'link': 'https://t.me/BotFather',
+                'link_text': 'settings.link.getApi',
+                'description': 'Platform bot that sends every user\'s Telegram alerts; users connect their chat with the Connect Telegram button'
+            },
+        ]
+    },
+
     # ==================== 7. AI Agent ====================
     'agent': {
         'title': 'AI Agent',

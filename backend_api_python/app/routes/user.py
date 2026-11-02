@@ -17,7 +17,9 @@ from app.services.user_preferences import (
     get_notification_settings as get_notification_settings_service,
     list_chart_templates as list_chart_templates_service,
     save_chart_template as save_chart_template_service,
+    create_telegram_link,
     send_test_notification,
+    telegram_link_status,
     update_notification_settings as update_notification_settings_service,
 )
 from app.services.user_service import get_user_service
@@ -836,6 +838,33 @@ def test_notification_settings():
     except Exception as e:
         logger.error(f"test_notification_settings failed: {e}")
         return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
+@user_blp.route('/notification-settings/telegram-link', methods=['POST'])
+@login_required
+def start_telegram_link():
+    """Create a deep link that connects the current user's Telegram chat to the platform bot."""
+    try:
+        return jsonify({'code': 1, 'msg': 'success', 'data': create_telegram_link(int(g.user_id))})
+    except ValueError as e:
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 400
+    except Exception as e:
+        logger.error(f"start_telegram_link failed: {e}")
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 502
+
+
+@user_blp.route('/notification-settings/telegram-link', methods=['GET'])
+@login_required
+def get_telegram_link_status():
+    """Report whether the Telegram link ``code`` has been opened in the bot; returns the bound chat id."""
+    try:
+        data = telegram_link_status(int(g.user_id), request.args.get('code') or '')
+        return jsonify({'code': 1, 'msg': 'success', 'data': data})
+    except ValueError as e:
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 400
+    except Exception as e:
+        logger.error(f"get_telegram_link_status failed: {e}")
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 502
+
+
 @user_blp.route('/change-password', methods=['POST'])
 @login_required
 def change_password():

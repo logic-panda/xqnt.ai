@@ -1,9 +1,14 @@
 """User preference and self-service account helpers."""
 
+import hashlib
+import hmac
 import json
+import os
 import time
+from functools import lru_cache
 from typing import Any
 
+from app.config.settings import Config
 from app.services.signal_notifier import SignalNotifier
 from app.services.user_service import get_user_service
 from app.utils.db import get_db_connection
@@ -121,6 +126,109 @@ def send_test_notification(user_id: int, accept_language: str = "") -> tuple[boo
     if failed:
         return True, f"Sent OK; failed: {', '.join(failed)}", {"results": results}
     return True, "Test notification sent", {"results": results}
+
+
+TELEGRAM_LINK_TTL_SEC = 15 * 60
+
+
+def create_telegram_link(user_id: int) -> dict:
+    """Return a t.me deep link whose /start payload proves ``user_id`` to the platform bot."""
+    token = _platform_telegram_token()
+    ts = int(time.time())
+    code = f"{int(user_id)}_{ts}_{_telegram_link_sig(int(user_id), ts)}"
+    return {
+        "code": code,
+        "url": f"https://t.me/{_telegram_bot_username(token)}?start={code}",
+        "expires_in": TELEGRAM_LINK_TTL_SEC,
+    }
+
+
+def telegram_link_status(user_id: int, code: str) -> dict:
+    """Read pending bot /start messages, bind their chats, and report whether ``code`` was bound."""
+    if _verify_telegram_link_code(code) != int(user_id):
+        raise ValueError("Invalid or expired Telegram link code")
+    sync_telegram_links()
+    settings = get_notification_settings(int(user_id)) or {}
+    linked = settings.get("telegram_link_code") == code
+    return {"linked": linked, "chat_id": str(settings.get("telegram_chat_id") or "") if linked else ""}
+
+
+def sync_telegram_links() -> int:
+    """Bind every chat that sent the platform bot ``/start <code>``; return how many were bound.
+
+    Updates are read on demand while a user waits on the link (no webhook, no polling loop) and
+    confirmed afterwards, so whichever request reads a /start binds it for its owner. Binding is
+    idempotent, so concurrent readers are harmless.
+    """
+    token = _platform_telegram_token()
+    notifier = SignalNotifier()
+    ok, updates = notifier._telegram_api(token, "getUpdates", {"timeout": 0, "allowed_updates": '["message"]'})
+    if not ok:
+        raise RuntimeError(f"Telegram getUpdates failed: {updates}")
+    bound = 0
+    for update in updates or []:
+        message = update.get("message") or {}
+        command, _, code = str(message.get("text") or "").partition(" ")
+        chat_id = (message.get("chat") or {}).get("id")
+        user_id = _verify_telegram_link_code(code.strip()) if command == "/start" else None
+        if user_id and chat_id is not None and _bind_telegram_chat(user_id, str(chat_id), code.strip()):
+            bound += 1
+            notifier._telegram_api(token, "sendMessage", {"chat_id": chat_id, "text": "✅ Telegram alerts connected."})
+    if updates:
+        notifier._telegram_api(token, "getUpdates", {"offset": int(updates[-1]["update_id"]) + 1, "limit": 1, "timeout": 0})
+    return bound
+
+
+def _platform_telegram_token() -> str:
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        raise ValueError("Telegram bot is not configured (TELEGRAM_BOT_TOKEN)")
+    return token
+
+
+@lru_cache(maxsize=4)
+def _telegram_bot_username(token: str) -> str:
+    ok, me = SignalNotifier()._telegram_api(token, "getMe", {})
+    if not ok or not (me or {}).get("username"):
+        raise RuntimeError(f"Telegram getMe failed: {me}")
+    return str(me["username"])
+
+
+def _telegram_link_sig(user_id: int, ts: int) -> str:
+    msg = f"telegram-link:{user_id}:{ts}".encode()
+    return hmac.new(Config.SECRET_KEY.encode(), msg, hashlib.sha256).hexdigest()[:24]
+
+
+def _verify_telegram_link_code(code: str) -> int | None:
+    try:
+        user_id, ts, sig = str(code or "").split("_")
+        user_id, ts = int(user_id), int(ts)
+    except ValueError:
+        return None
+    if abs(time.time() - ts) > TELEGRAM_LINK_TTL_SEC:
+        return None
+    return user_id if hmac.compare_digest(sig, _telegram_link_sig(user_id, ts)) else None
+
+
+def _bind_telegram_chat(user_id: int, chat_id: str, code: str) -> bool:
+    """Point the user's Telegram target at ``chat_id`` once per code; False when already bound."""
+    row = _fetch_user_settings_row(user_id)
+    if not row:
+        return False
+    settings = _loads_dict(row.get("notification_settings") or "")
+    if settings.get("telegram_link_code") == code:
+        return False
+    settings.update(telegram_chat_id=chat_id, telegram_link_code=code)
+    settings.pop("telegram_bot_token", None)  # chats bound here only accept the platform bot
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            "UPDATE qd_users SET notification_settings = ?, updated_at = NOW() WHERE id = ?",
+            (json.dumps(settings, ensure_ascii=False), user_id),
+        )
+        db.commit()
+        cur.close()
+    return True
 
 
 def list_chart_templates(user_id: int) -> list:

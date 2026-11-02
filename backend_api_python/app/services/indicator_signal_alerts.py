@@ -1238,8 +1238,8 @@ class IndicatorSignalAlertService:
         targets = task.get("targets") or {}
         token = str(targets.get("telegram_bot_token") or targets.get("telegram_token") or "").strip()
         chat_id = str(targets.get("telegram_chat_id") or targets.get("telegram") or "").strip()
-        if not token or not chat_id:
-            return {"ok": False, "message": "missing_telegram_chat_id" if token else "missing_telegram_bot_token"}
+        if not chat_id:
+            return {"ok": False, "message": "missing_telegram_chat_id"}
         side = _signal_side(signal.get("label"), signal.get("type"))
         opened = _epoch(signal.get("bar_time")) if side in ("buy", "sell") else None
         png = None
@@ -1382,8 +1382,6 @@ class IndicatorSignalAlertService:
     def _edit_telegram(self, targets: Dict[str, Any], row: Dict[str, Any], caption: str, png: Optional[bytes]) -> str:
         """Edit a sent signal message to ``caption`` and, for photos, to the chart ``png``; '' or the error."""
         token = str(targets.get("telegram_bot_token") or targets.get("telegram_token") or "").strip()
-        if not token:
-            return "missing_telegram_bot_token"
         ref = {"chat_id": row["chat_id"], "message_id": int(row["message_id"])}
         if row["message_kind"] != "photo":
             ok, res = self.notifier._telegram_api(
