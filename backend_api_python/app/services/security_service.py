@@ -422,7 +422,10 @@ class SecurityService:
                 if row and row['count'] > 0:
                     db.rollback()
                     cur.close()
-                    return False, f'Please wait {self.code_rate_limit_seconds} seconds before requesting another code'
+                    return False, (
+                        'A code was already sent to this email. Check your inbox (and spam), '
+                        f'or wait {self.code_rate_limit_seconds} seconds to request a new one.'
+                    )
                 
                 # Check IP hourly limit
                 cur.execute(
