@@ -1,6 +1,7 @@
 // Railway production topology for QuantDinger, mirroring docker-compose.yml.
 //
-// Secrets (SECRET_KEY, CREDENTIAL_ENCRYPTION_KEY, ADMIN_*, MCP_AUTH_TOKEN) are
+// Secrets (SECRET_KEY, CREDENTIAL_ENCRYPTION_KEY, ADMIN_*, MCP_AUTH_TOKEN,
+// TELEGRAM_BOT_TOKEN) are
 // Railway shared variables set outside source control and referenced through
 // `ctx.shared`. Backend services build from GitHub `main` on every push that
 // touches backend_api_python/. mcp stays unconnected until its Agent token
@@ -112,6 +113,8 @@ export default defineRailway((ctx) => {
     CREDENTIAL_ENCRYPTION_KEY: ctx.shared.CREDENTIAL_ENCRYPTION_KEY,
     ADMIN_USER: ctx.shared.ADMIN_USER,
     ADMIN_PASSWORD: ctx.shared.ADMIN_PASSWORD,
+    // Platform bot: the API links users' chats, every worker sends their alerts.
+    TELEGRAM_BOT_TOKEN: ctx.shared.TELEGRAM_BOT_TOKEN,
     TZ: "Asia/Shanghai",
     LOG_FORMAT: "json",
     DATABASE_URL: pg.env.DATABASE_URL,
@@ -130,8 +133,9 @@ export default defineRailway((ctx) => {
     DB_POOL_ACQUIRE_TIMEOUT: "10",
     DB_POOL_HEALTH_CHECK: "true",
     SKIP_AUTO_MIGRATE: "true",
-    // Desktop brokers (IBKR TWS/Gateway) are unreachable from Railway.
-    ALLOW_LOCAL_DESKTOP_BROKERS: "false",
+    // IBKR enabled: users must point host/port at a TWS/IB Gateway reachable
+    // from Railway (private-network service or tunnel), not 127.0.0.1.
+    ALLOW_LOCAL_DESKTOP_BROKERS: "true",
     MARKET_CATALOG_AUTO_SYNC: "true",
     MARKET_CATALOG_SYNC_INTERVAL_SEC: "86400",
     KAFKA_BOOTSTRAP_SERVERS: KAFKA_BOOTSTRAP,
