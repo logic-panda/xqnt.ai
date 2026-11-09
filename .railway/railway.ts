@@ -130,8 +130,9 @@ export default defineRailway((ctx) => {
     DB_POOL_ACQUIRE_TIMEOUT: "10",
     DB_POOL_HEALTH_CHECK: "true",
     SKIP_AUTO_MIGRATE: "true",
-    // Desktop brokers (IBKR TWS/Gateway) are unreachable from Railway.
-    ALLOW_LOCAL_DESKTOP_BROKERS: "false",
+    // IBKR enabled: users must point host/port at a TWS/IB Gateway reachable
+    // from Railway (private-network service or tunnel), not 127.0.0.1.
+    ALLOW_LOCAL_DESKTOP_BROKERS: "true",
     MARKET_CATALOG_AUTO_SYNC: "true",
     MARKET_CATALOG_SYNC_INTERVAL_SEC: "86400",
     KAFKA_BOOTSTRAP_SERVERS: KAFKA_BOOTSTRAP,
