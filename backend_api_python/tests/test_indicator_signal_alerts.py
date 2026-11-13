@@ -673,3 +673,59 @@ def test_telegram_errors_never_carry_the_bot_token(monkeypatch):
     ok, error = SignalNotifier()._telegram_api("123:SECRET", "sendMessage", {"chat_id": "1"})
 
     assert not ok and "SECRET" not in error and "/bot***/sendMessage" in error
+
+
+def test_webhook_credentials_stay_with_their_url(monkeypatch):
+    monkeypatch.setattr(
+        indicator_signal_alerts,
+        "get_notification_settings",
+        lambda user_id: {
+            "webhook_url": "https://example.com/hook",
+            "webhook_token": "profile-token",
+            "webhook_signing_secret": "profile-secret",
+        },
+    )
+
+    def targets(**webhook):
+        payload = {"indicator_id": 12, "symbol": "BTC/USDT", "channels": ["webhook"], "targets": webhook}
+        saved = IndicatorSignalAlertService()._sanitize_payload(7, payload)["targets"]
+        return saved["webhook_url"], saved["webhook_token"], saved["webhook_signing_secret"]
+
+    other = "https://other.example/hook"
+    # The profile's webhook, named or not, brings the profile's credentials.
+    assert targets() == targets(webhook_url="https://example.com/hook") == ("https://example.com/hook", "profile-token", "profile-secret")
+    # Another receiver gets the token typed for it, or none: never the profile's.
+    assert targets(webhook_url=other, webhook_token="own-token") == (other, "own-token", "")
+    assert targets(webhook_url=other) == (other, "", "")
+
+
+def test_alert_webhook_sends_its_token_as_the_profile_test_does(monkeypatch, caplog):
+    sent = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+    def post(url, **kwargs):
+        sent.append((url, kwargs["headers"].get("Authorization")))
+        return Response()
+
+    monkeypatch.setattr(signal_notifier.requests, "post", post)
+    service = IndicatorSignalAlertService()
+    task = {
+        "id": 5,
+        "symbol": "BTC/USDT",
+        "timeframe": "5m",
+        "channels": ["webhook"],
+        "targets": {"webhook_url": "https://other.example/hook", "webhook_token": "own-token"},
+    }
+    signal = {"type": "buy", "label": "Buy", "price": 10.0, "bar_time": "2026-01-01T00:00:00"}
+
+    assert service._deliver_signal(task, signal, _df())["webhook"] == {"ok": True, "message": ""}
+    SignalNotifier()._notify_webhook(url="https://other.example/hook", payload={"event": "qd.profile_test"}, token_override="own-token")
+    assert sent == [("https://other.example/hook", "Bearer own-token")] * 2
+
+    # A receiver's rejection is logged, not only stored on the task.
+    Response.status_code, Response.text = 401, "bad token"
+    assert service._deliver_signal(task, signal, _df())["webhook"] == {"ok": False, "message": "http_401:bad token"}
+    assert "alert 5 webhook delivery failed: http_401:bad token" in caplog.text

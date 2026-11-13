@@ -749,6 +749,10 @@ class IndicatorSignalAlertService:
         ):
             if key in payload and key not in targets:
                 targets[key] = payload.get(key)
+        # A webhook's token and signing secret belong to its URL: an alert with its own URL
+        # sends only its own, never the profile's to another receiver.
+        webhook_url = str(targets.get("webhook_url") or "").strip()
+        own_webhook = bool(webhook_url) and webhook_url != str(profile_settings.get("webhook_url") or "").strip()
         for key in (
             "email",
             "telegram_chat_id",
@@ -758,7 +762,8 @@ class IndicatorSignalAlertService:
             "webhook_signing_secret",
         ):
             if not str(targets.get(key) or "").strip():
-                targets[key] = str(profile_settings.get(key) or "").strip()
+                from_profile = not (own_webhook and key in ("webhook_token", "webhook_signing_secret"))
+                targets[key] = str(profile_settings.get(key) or "").strip() if from_profile else ""
 
         if "email" in channels and not str(targets.get("email") or "").strip():
             raise ValueError("Missing email notification target")
@@ -1230,6 +1235,9 @@ class IndicatorSignalAlertService:
                 signing_secret_override=targets.get("webhook_signing_secret") or targets.get("webhookSigningSecret") or None,
             )
             result["webhook"] = {"ok": ok, "message": msg}
+            if not ok:
+                # A receiver's rejection (e.g. 401 for a wrong token) is otherwise visible only on the task row.
+                logger.warning("Indicator signal alert %s webhook delivery failed: %s", task.get("id"), msg)
         return result
 
     def _send_telegram(self, task: Dict[str, Any], signal: Dict[str, Any], df: pd.DataFrame, caption: str) -> Dict[str, Any]:
