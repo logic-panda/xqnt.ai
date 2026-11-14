@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -371,7 +372,10 @@ def test_evaluate_task_delivers_each_candle_once_from_the_chart_exchange(monkeyp
 
 
 class _SendsDb:
-    """qd_indicator_signal_sends with its primary key: a conflicting insert affects no row."""
+    """qd_indicator_signal_sends with the primary key its DDL declares: a conflicting insert affects no row."""
+
+    _columns = ("user_id", "market", "symbol", "slot", "alert_id")  # the claim INSERT's column order
+    _primary_key = re.search(r"PRIMARY KEY \(([^)]+)\)", indicator_signal_alerts._SENDS_TABLE_SQL).group(1).split(", ")
 
     def __init__(self):
         self.rows, self._pending, self.rowcount = set(), [], 0
@@ -388,7 +392,7 @@ class _SendsDb:
     def execute(self, sql, args=()):
         if not sql.strip().startswith("INSERT"):
             return
-        key = args[:4]
+        key = tuple(args[self._columns.index(column)] for column in self._primary_key)
         fresh = key not in self.rows and key not in self._pending
         self.rowcount = int(fresh)
         if fresh:
@@ -414,13 +418,16 @@ def test_one_notification_per_market_per_candle_and_minute(monkeypatch):
     candle = {"bar_time": "2026-11-13T10:00:00"}
 
     assert service._claim_market_slot(alert, candle, now) is True
-    # Another alert on the market, same candle (later minute) or same minute (other timeframe): skipped.
+    # Another alert on the market, whatever its symbol: skipped on the same candle (a later minute)
+    # and in the same minute (another timeframe's candle).
     assert service._claim_market_slot({**alert, "id": 2}, candle, now + timedelta(minutes=3)) is False
-    assert service._claim_market_slot({**alert, "id": 3, "timeframe": "1m"}, {"bar_time": "2026-11-13T10:01:00"}, now) is False
+    assert service._claim_market_slot({**alert, "id": 4, "symbol": "ETH/USDT"}, candle, now + timedelta(minutes=3)) is False
+    sol_1m = {**alert, "id": 3, "symbol": "SOL/USDT", "timeframe": "1m"}
+    assert service._claim_market_slot(sol_1m, {"bar_time": "2026-11-13T10:01:00"}, now) is False
     # A failed claim holds nothing: that 1m candle goes out in the next minute.
-    assert service._claim_market_slot({**alert, "id": 3, "timeframe": "1m"}, {"bar_time": "2026-11-13T10:01:00"}, now + timedelta(minutes=1)) is True
+    assert service._claim_market_slot(sol_1m, {"bar_time": "2026-11-13T10:01:00"}, now + timedelta(minutes=1)) is True
     # Other markets and other users are independent.
-    assert service._claim_market_slot({**alert, "symbol": "ETH/USDT"}, candle, now) is True
+    assert service._claim_market_slot({**alert, "market": "Forex", "symbol": "EUR/USD"}, candle, now) is True
     assert service._claim_market_slot({**alert, "user_id": 8}, candle, now) is True
 
 

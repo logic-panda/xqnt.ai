@@ -1141,6 +1141,18 @@ CREATE TABLE IF NOT EXISTS qd_indicator_signal_results (
 
 CREATE INDEX IF NOT EXISTS idx_indicator_signal_results_pending ON qd_indicator_signal_results(due_at) WHERE status = 'pending';
 
+-- Market slots a user's alerts already notified: one notification per market (Crypto, Forex, ...) per
+-- candle and per minute, whatever the symbol. Symbol and alert_id record which alert took the slot.
+CREATE TABLE IF NOT EXISTS qd_indicator_signal_sends (
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    market VARCHAR(32) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    slot VARCHAR(96) NOT NULL,
+    alert_id INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, market, slot)
+);
+
 -- =============================================================================
 -- 6b. Strategy runtime logs (dashboard / API)
 -- =============================================================================

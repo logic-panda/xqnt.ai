@@ -3,8 +3,9 @@
 This service monitors chart-only indicator ``output.signals`` and delivers one
 notification per candle with the selected markers the chart draws on it (none
 when they point both ways): as the candle closes, or already while it forms for
-pre-close and realtime alerts. A user's alerts on the same market send one
-notification per candle and per minute between them: the first to fire wins.
+pre-close and realtime alerts. A user's alerts on the same market (Crypto, Forex,
+...), whatever their symbols, send one notification per candle and per minute
+between them: the first to fire wins.
 It never places orders and does not reuse strategy execution state.
 """
 from __future__ import annotations
@@ -384,8 +385,9 @@ _RESULTS_INDEX_SQL = (
     "ON qd_indicator_signal_results(due_at) WHERE status = 'pending'"
 )
 
-# Market slots a user's alerts already notified: one notification per market per candle and per minute,
-# however many alerts (or worker processes) fire on it. The primary key makes the claim atomic.
+# Market slots a user's alerts already notified: one notification per market (Crypto, Forex, ...) per candle
+# and per minute, whatever the symbol and however many alerts (or worker processes) fire on it. The primary
+# key makes the claim atomic; symbol and alert_id record which alert took the slot.
 _SENDS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS qd_indicator_signal_sends (
     user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
@@ -394,7 +396,7 @@ CREATE TABLE IF NOT EXISTS qd_indicator_signal_sends (
     slot VARCHAR(96) NOT NULL,
     alert_id INTEGER NOT NULL,
     created_at TIMESTAMP DEFAULT NOW(),
-    PRIMARY KEY (user_id, market, symbol, slot)
+    PRIMARY KEY (user_id, market, slot)
 )
 """
 # ponytail: claims older than a week are pruned, so candle slots of monthly alerts can repeat; keep longer if they matter.
@@ -1458,8 +1460,8 @@ class IndicatorSignalAlertService:
             cur.close()
 
     def _claim_market_slot(self, task: Dict[str, Any], signal: Dict[str, Any], now: datetime) -> bool:
-        """True when this alert is the first of its user's to notify the market on the signal's candle
-        and in this minute; claims both, so other alerts on that market skip them."""
+        """True when this alert is the first of its user's on its market (any symbol) to notify the
+        signal's candle and this minute; claims both, so other alerts on that market skip them."""
         key = (int(task["user_id"]), str(task.get("market") or ""), str(task.get("symbol") or ""))
         slots = (f"{task.get('timeframe')}@{signal.get('bar_time')}", f"minute@{now:%Y-%m-%dT%H:%M}")
         with get_db_connection() as db:
