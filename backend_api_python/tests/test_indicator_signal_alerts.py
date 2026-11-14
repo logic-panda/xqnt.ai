@@ -350,6 +350,7 @@ def test_evaluate_task_delivers_each_candle_once_from_the_chart_exchange(monkeyp
     monkeypatch.setattr(service.kline, "get_kline", lambda **kwargs: kline_calls.append(kwargs) or [])
     monkeypatch.setattr(service, "_bars_to_df", lambda bars: _df(4))
     monkeypatch.setattr(service, "_execute_indicator", lambda code, df, params: output)
+    monkeypatch.setattr(service, "_claim_market_slot", lambda task, signal, now: True)
     monkeypatch.setattr(service, "_deliver_signal", lambda task, signal, df: delivered.append(signal["label"]) or {})
     monkeypatch.setattr(
         service,
@@ -367,6 +368,86 @@ def test_evaluate_task_delivers_each_candle_once_from_the_chart_exchange(monkeyp
     assert service.evaluate_task(9)["triggered"] is False
     assert len(delivered) == 1
     assert saved["checked"]["last_bar_time"] == "1970-01-01T00:00:02"
+
+
+class _SendsDb:
+    """qd_indicator_signal_sends with its primary key: a conflicting insert affects no row."""
+
+    def __init__(self):
+        self.rows, self._pending, self.rowcount = set(), [], 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, args=()):
+        if not sql.strip().startswith("INSERT"):
+            return
+        key = args[:4]
+        fresh = key not in self.rows and key not in self._pending
+        self.rowcount = int(fresh)
+        if fresh:
+            self._pending.append(key)
+
+    def commit(self):
+        self.rows.update(self._pending)
+        self._pending = []
+
+    def rollback(self):
+        self._pending = []
+
+    def close(self):
+        pass
+
+
+def test_one_notification_per_market_per_candle_and_minute(monkeypatch):
+    db = _SendsDb()
+    monkeypatch.setattr(indicator_signal_alerts, "get_db_connection", lambda: db)
+    service = IndicatorSignalAlertService()
+    now = datetime(2026, 11, 13, 10, 1, 30)
+    alert = {"id": 1, "user_id": 7, "market": "Crypto", "symbol": "BTC/USDT", "timeframe": "5m"}
+    candle = {"bar_time": "2026-11-13T10:00:00"}
+
+    assert service._claim_market_slot(alert, candle, now) is True
+    # Another alert on the market, same candle (later minute) or same minute (other timeframe): skipped.
+    assert service._claim_market_slot({**alert, "id": 2}, candle, now + timedelta(minutes=3)) is False
+    assert service._claim_market_slot({**alert, "id": 3, "timeframe": "1m"}, {"bar_time": "2026-11-13T10:01:00"}, now) is False
+    # A failed claim holds nothing: that 1m candle goes out in the next minute.
+    assert service._claim_market_slot({**alert, "id": 3, "timeframe": "1m"}, {"bar_time": "2026-11-13T10:01:00"}, now + timedelta(minutes=1)) is True
+    # Other markets and other users are independent.
+    assert service._claim_market_slot({**alert, "symbol": "ETH/USDT"}, candle, now) is True
+    assert service._claim_market_slot({**alert, "user_id": 8}, candle, now) is True
+
+
+def test_evaluate_task_skips_a_market_another_alert_already_notified(monkeypatch):
+    service = IndicatorSignalAlertService()
+    task = {
+        "id": 9, "user_id": 1, "indicator_id": 5, "market": "Crypto", "symbol": "ETH/USDT", "timeframe": "5m",
+        "status": "running", "signal_keys": ["any"], "params": {}, "last_bar_time": "",
+        "last_signal_payload": {"signal": {"label": "old"}}, "targets": {"trigger_mode": "realtime"},
+    }
+    output = {"signals": [{"type": "buy", "text": "Next Up", "renderMode": "events", "data": [None, None, None, 13.0]}]}
+    delivered, checked = [], {}
+    monkeypatch.setattr(indicator_signal_alerts, "ensure_indicator_signal_alert_schema", lambda: None)
+    monkeypatch.setattr(service, "_load_task", lambda task_id: dict(task))
+    monkeypatch.setattr(service, "_load_indicator_for_user", lambda user_id, indicator_id: {"code": "output = {}"})
+    monkeypatch.setattr(service.kline, "get_kline", lambda **kwargs: [])
+    monkeypatch.setattr(service, "_bars_to_df", lambda bars: _df(4))
+    monkeypatch.setattr(service, "_execute_indicator", lambda code, df, params: output)
+    monkeypatch.setattr(service, "_claim_market_slot", lambda task, signal, now: False)
+    monkeypatch.setattr(service, "_deliver_signal", lambda task, signal, df: delivered.append(signal) or {})
+    monkeypatch.setattr(service, "_mark_checked", lambda task_id, **kwargs: checked.update(kwargs))
+
+    assert service.evaluate_task(9) == {"triggered": False, "reason": "market_already_notified"}
+    assert delivered == []
+    # The skipped candle is remembered as sent, so this alert never sends it later in the candle.
+    assert checked["payload"]["signal"] == {"label": "old"}
+    assert len(checked["payload"]["sent"]) == 1
 
 
 def test_signal_alert_payload_normalizes_trigger_mode_and_chart_exchange(monkeypatch):

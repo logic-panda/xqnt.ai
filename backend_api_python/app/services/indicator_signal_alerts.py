@@ -3,8 +3,9 @@
 This service monitors chart-only indicator ``output.signals`` and delivers one
 notification per candle with the selected markers the chart draws on it (none
 when they point both ways): as the candle closes, or already while it forms for
-pre-close and realtime alerts. It never places orders and does not reuse
-strategy execution state.
+pre-close and realtime alerts. A user's alerts on the same market send one
+notification per candle and per minute between them: the first to fire wins.
+It never places orders and does not reuse strategy execution state.
 """
 from __future__ import annotations
 
@@ -383,6 +384,22 @@ _RESULTS_INDEX_SQL = (
     "ON qd_indicator_signal_results(due_at) WHERE status = 'pending'"
 )
 
+# Market slots a user's alerts already notified: one notification per market per candle and per minute,
+# however many alerts (or worker processes) fire on it. The primary key makes the claim atomic.
+_SENDS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS qd_indicator_signal_sends (
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    market VARCHAR(32) NOT NULL,
+    symbol VARCHAR(64) NOT NULL,
+    slot VARCHAR(96) NOT NULL,
+    alert_id INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, market, symbol, slot)
+)
+"""
+# ponytail: claims older than a week are pruned, so candle slots of monthly alerts can repeat; keep longer if they matter.
+_SENDS_KEEP = "8 days"
+
 
 @functools.cache
 def ensure_indicator_signal_alert_schema() -> None:
@@ -423,6 +440,7 @@ def ensure_indicator_signal_alert_schema() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_indicator_signal_alerts_indicator_id ON qd_indicator_signal_alerts(indicator_id)")
         cur.execute(_RESULTS_TABLE_SQL)
         cur.execute(_RESULTS_INDEX_SQL)
+        cur.execute(_SENDS_TABLE_SQL)
         db.commit()
         cur.close()
 
@@ -706,9 +724,20 @@ class IndicatorSignalAlertService:
                 self._mark_checked(task_id, next_check=next_check, last_error="", last_bar_time=last_closed_time)
                 return {"triggered": False, "reason": "no_signal"}
 
-            deliveries = [self._deliver_signal(task, signal, df) for signal in signals]
-            self._mark_triggered(task_id, signals, deliveries, last_closed_time, sent, next_check)
-            return {"triggered": True, "signal": signals[-1], "delivery": deliveries[-1], "signals": signals}
+            # Newest first, so a catch-up that finds several candles sends the freshest one.
+            claimed = [s for s in reversed(signals) if self._claim_market_slot(task, s, now)][::-1]
+            if not claimed:
+                # Another alert already notified this market on this candle or minute: drop these for good.
+                previous = task.get("last_signal_payload") if isinstance(task.get("last_signal_payload"), dict) else {}
+                self._mark_checked(
+                    task_id, next_check=next_check, last_error="", last_bar_time=last_closed_time,
+                    payload={**previous, "sent": sent},
+                )
+                return {"triggered": False, "reason": "market_already_notified"}
+
+            deliveries = [self._deliver_signal(task, signal, df) for signal in claimed]
+            self._mark_triggered(task_id, claimed, deliveries, last_closed_time, sent, next_check)
+            return {"triggered": True, "signal": claimed[-1], "delivery": deliveries[-1], "signals": claimed}
         except Exception as exc:
             logger.warning("Indicator signal alert evaluation failed for %s: %s", task_id, exc)
             logger.debug(traceback.format_exc())
@@ -1428,7 +1457,38 @@ class IndicatorSignalAlertService:
             db.commit()
             cur.close()
 
-    def _mark_checked(self, task_id: int, *, next_check: datetime, last_error: str, last_bar_time: Optional[str] = None) -> None:
+    def _claim_market_slot(self, task: Dict[str, Any], signal: Dict[str, Any], now: datetime) -> bool:
+        """True when this alert is the first of its user's to notify the market on the signal's candle
+        and in this minute; claims both, so other alerts on that market skip them."""
+        key = (int(task["user_id"]), str(task.get("market") or ""), str(task.get("symbol") or ""))
+        slots = (f"{task.get('timeframe')}@{signal.get('bar_time')}", f"minute@{now:%Y-%m-%dT%H:%M}")
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(f"DELETE FROM qd_indicator_signal_sends WHERE created_at < NOW() - INTERVAL '{_SENDS_KEEP}'")
+            claimed = 0
+            for slot in slots:
+                cur.execute(
+                    """
+                    INSERT INTO qd_indicator_signal_sends (user_id, market, symbol, slot, alert_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    RETURNING slot
+                    """,
+                    (*key, slot, int(task["id"])),
+                )
+                claimed += max(cur.rowcount, 0)
+            ok = claimed == len(slots)
+            if ok:
+                db.commit()
+            else:
+                db.rollback()
+            cur.close()
+        return ok
+
+    def _mark_checked(
+        self, task_id: int, *, next_check: datetime, last_error: str, last_bar_time: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
@@ -1438,11 +1498,12 @@ class IndicatorSignalAlertService:
                     last_checked_at = NOW(),
                     next_check_at = ?,
                     last_bar_time = COALESCE(?, last_bar_time),
+                    last_signal_payload = COALESCE(?, last_signal_payload),
                     last_error = ?,
                     updated_at = NOW()
                 WHERE id = ?
                 """,
-                (next_check, last_bar_time, last_error, int(task_id)),
+                (next_check, last_bar_time, None if payload is None else _json_dumps(payload), last_error, int(task_id)),
             )
             db.commit()
             cur.close()
