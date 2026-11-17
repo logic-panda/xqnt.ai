@@ -794,8 +794,11 @@ def test_alert_webhook_sends_its_token_as_the_profile_test_does(monkeypatch, cap
         status_code = 200
         text = ""
 
+    bodies = []
+
     def post(url, **kwargs):
         sent.append((url, kwargs["headers"].get("Authorization")))
+        bodies.append(kwargs.get("json") or {})
         return Response()
 
     monkeypatch.setattr(signal_notifier.requests, "post", post)
@@ -812,6 +815,8 @@ def test_alert_webhook_sends_its_token_as_the_profile_test_does(monkeypatch, cap
     assert service._deliver_signal(task, signal, _df())["webhook"] == {"ok": True, "message": ""}
     SignalNotifier()._notify_webhook(url="https://other.example/hook", payload={"event": "qd.profile_test"}, token_override="own-token")
     assert sent == [("https://other.example/hook", "Bearer own-token")] * 2
+    # The alert's payload carries the UTC moment it was dispatched to the webhook.
+    assert datetime.fromisoformat(bodies[0]["signal"]["sent_at"]).utcoffset() == timedelta(0)
 
     # A receiver's rejection is logged, not only stored on the task.
     Response.status_code, Response.text = 401, "bad token"

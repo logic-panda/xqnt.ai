@@ -1258,9 +1258,11 @@ class IndicatorSignalAlertService:
         if "telegram" in channels:
             result["telegram"] = self._send_telegram(task, signal, df, telegram_html)
         if "webhook" in channels:
+            # Stamp the dispatch moment (UTC, ISO 8601) so receivers can measure delivery latency.
+            sent_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             ok, msg = self.notifier._notify_webhook(
                 url=str(targets.get("webhook_url") or targets.get("webhook") or ""),
-                payload=payload,
+                payload={**payload, "signal": {**payload["signal"], "sent_at": sent_at}},
                 headers_override=targets.get("webhook_headers") or targets.get("webhookHeaders") or None,
                 token_override=targets.get("webhook_token") or targets.get("webhookToken") or None,
                 signing_secret_override=targets.get("webhook_signing_secret") or targets.get("webhookSigningSecret") or None,
