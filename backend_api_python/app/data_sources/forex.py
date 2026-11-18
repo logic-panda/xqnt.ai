@@ -3,7 +3,7 @@
 三级降级: Twelve Data → Tiingo → yfinance
 """
 from typing import Dict, List, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import time
 import requests
@@ -246,8 +246,8 @@ class ForexDataSource(BaseDataSource):
                 change_pct = 0
                 
                 try:
-                    yesterday = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
-                    today = datetime.now().strftime('%Y-%m-%d')
+                    yesterday = (datetime.now(timezone.utc) - timedelta(days=2)).strftime('%Y-%m-%d')
+                    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
                     price_url = f"{self.base_url}/fx/{tiingo_symbol}/prices"
                     price_params = {
                         'startDate': yesterday,
@@ -361,9 +361,11 @@ class ForexDataSource(BaseDataSource):
             "apikey": api_key,
             "format": "JSON",
             "dp": "5",
+            # Provider times must not depend on the container TZ (prod runs Asia/Shanghai).
+            "timezone": "UTC",
         }
         if before_time:
-            params["end_date"] = datetime.fromtimestamp(int(before_time)).strftime("%Y-%m-%d %H:%M:%S")
+            params["end_date"] = datetime.fromtimestamp(int(before_time), timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         data = _td_request("https://api.twelvedata.com/time_series", params)
         if not data:
@@ -374,7 +376,7 @@ class ForexDataSource(BaseDataSource):
         klines = []
         for v in values:
             try:
-                dt = datetime.fromisoformat(v["datetime"])
+                dt = datetime.fromisoformat(v["datetime"]).replace(tzinfo=timezone.utc)
                 klines.append({
                     "time": int(dt.timestamp()),
                     "open": float(v["open"]),
@@ -424,9 +426,9 @@ class ForexDataSource(BaseDataSource):
                 logger.info(f"Note: Tiingo 1-minute forex data requires a paid subscription")
             
             if before_time:
-                end_dt = datetime.fromtimestamp(before_time)
+                end_dt = datetime.fromtimestamp(before_time, timezone.utc)
             else:
-                end_dt = datetime.now()
+                end_dt = datetime.now(timezone.utc)
             
             if aggregate_to_weekly or aggregate_to_monthly:
                 tf_seconds = 86400  # 日线秒数
@@ -639,9 +641,9 @@ class ForexDataSource(BaseDataSource):
 
         try:
             if before_time:
-                end_dt = datetime.fromtimestamp(before_time)
+                end_dt = datetime.fromtimestamp(before_time, timezone.utc)
             else:
-                end_dt = datetime.now()
+                end_dt = datetime.now(timezone.utc)
 
             tf_seconds = self._get_timeframe_seconds(timeframe)
             start_dt = end_dt - timedelta(seconds=tf_seconds * limit * 1.5)
